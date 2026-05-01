@@ -1,63 +1,54 @@
-import streamlit as st
+import os
 import requests
+import hashlib
 from datetime import datetime, timedelta
+from flask import Flask, request, render_template_string, session, redirect, url_for
 
-# ---------- 核心 API 调用 ----------
-def login(username, password):
+app = Flask(__name__)
+app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
+
+def generate_sign(params, secret="icampus2025"):
+    sorted_param = sorted(params.items())
+    sign_str = "&".join([f"{k}={v}" for k, v in sorted_param])
+    sign_str += f"&secret={secret}"
+    return hashlib.md5(sign_str.encode("utf-8")).hexdigest()
+
+# ---------- 核心业务逻辑 ----------
+def get_token_by_password(username, password):
     url = "https://api.icampus.ltd/api/cloud/user/login"
     payload = {"phone": username, "password": password}
+    payload["sign"] = generate_sign(payload)
     resp = requests.post(url, json=payload, timeout=10)
     if resp.status_code != 200:
-        st.error(f"登录失败：HTTP {resp.status_code}")
-        return None
+        raise Exception(f"HTTP错误 {resp.status_code}")
     data = resp.json()
     if data.get("code") != 0:
-        st.error(f"登录失败：{data.get('message')}")
-        return None
+        raise Exception(data.get("message"))
     token = data["data"][0]["token"]
     return token
 
 def fetch_orders(token):
-    url = "https://api.icampus.ltd/api/hssdyzx/user/order_service/goods"
-    params = {"payment": 2, "limit": 200, "index": 0}
+    order_url = "https://api.icampus.ltd/api/hssdyzx/user/order_service/goods"
+    params = {"payment": 0, "limit": 50, "index": 0, "status": -3}
     cookies = {"token": token}
     headers = {
         "Authorization": f"Bearer {token}",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0",
+        "Accept": "*/*",
         "Referer": "https://wx.icampus.ltd/",
         "Origin": "https://wx.icampus.ltd"
     }
-    resp = requests.get(url, headers=headers, cookies=cookies, params=params, timeout=10)
+    resp = requests.get(order_url, headers=headers, cookies=cookies, params=params)
     if resp.status_code != 200:
-        st.error(f"订单接口错误：HTTP {resp.status_code}")
-        return []
+        raise Exception(f"HTTP {resp.status_code}")
     data = resp.json()
     if data.get("code") != 0:
-        st.error(f"订单接口错误：{data.get('message')}")
-        return []
+        raise Exception(data.get("message"))
     return data.get("data", {}).get("list", [])
 
-def get_date_range():
-    """从今天到下周日（包含）"""
-    today = datetime.now().date()
-    weekday = today.weekday()  # 周一=0, 周日=6
-    days_to_next_sunday = (6 - weekday) % 7
-    if days_to_next_sunday == 0:
-        next_sunday = today + timedelta(days=7)
-    else:
-        next_sunday = today + timedelta(days=days_to_next_sunday + 7)
-    delta = (next_sunday - today).days + 1
-    date_list = [(today + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(delta)]
-    return date_list
-
-def generate_table(orders, date_list):
-    """返回表格数据（星期，午餐，晚餐）"""
-    # 初始化
-    weekday_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+def generate_report(orders, date_list):
     schedule = {date: {"lunch": [], "dinner": []} for date in date_list}
-
-    # 过滤正餐并填充
     for o in orders:
         if o.get("food_table_id") == 0:
             continue
@@ -67,79 +58,131 @@ def generate_table(orders, date_list):
         date_str = o.get("plan_date") or o.get("created_at", "")[:10]
         if date_str not in schedule:
             continue
-        table_name = o.get("food_table_name", "").strip()
+        table = o.get("food_table_name", "").strip()
         option = o.get("food_option_name", "").strip()
-        meal = table_name if option == "默认选项" else f"{table_name} {option}"
-        meal = meal.strip()
+        meal = table if option == "默认选项" else f"{table} {option}"
         if "午餐" in period:
             schedule[date_str]["lunch"].append(meal)
         else:
             schedule[date_str]["dinner"].append(meal)
-
-    # 构建表格行
-    rows = []
+    weekday_cn = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    lines = []
     for date in date_list:
         dt = datetime.strptime(date, "%Y-%m-%d")
-        weekday = weekday_names[dt.weekday()]
+        weekday = weekday_cn[dt.weekday()]
         lunch = "；".join(schedule[date]["lunch"]) if schedule[date]["lunch"] else "无"
         dinner = "；".join(schedule[date]["dinner"]) if schedule[date]["dinner"] else "无"
-        rows.append([weekday, lunch, dinner])
-    return rows
+        lines.append((weekday, lunch, dinner))
+    return lines
 
-# ---------- Streamlit UI ----------
-st.set_page_config(page_title="智慧校园订餐查询", page_icon="🍱")
-st.title("🍱 未来一周订餐查询")
+def get_week_dates():
+    today = datetime.now().date()
+    weekday = today.weekday()
+    days_until_next_sunday = (6 - weekday) % 7
+    if days_until_next_sunday == 0:
+        next_sunday = today + timedelta(days=7)
+    else:
+        next_sunday = today + timedelta(days=days_until_next_sunday + 7)
+    delta = (next_sunday - today).days + 1
+    return [(today + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(delta)]
 
-# 初始化 session_state 存储 token
-if "token" not in st.session_state:
-    st.session_state.token = None
+# ---------- 网页模板 ----------
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>订餐查询</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 600px; margin: 2rem auto; padding: 1rem; }
+        input, button { padding: 0.5rem; font-size: 1rem; margin: 0.5rem 0; width: 100%; box-sizing: border-box; }
+        table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+        th, td { border: 1px solid #ccc; padding: 0.5rem; text-align: left; }
+        th { background: #f0f0f0; }
+        .error { color: red; }
+        .success { color: green; }
+        .info { font-size: 0.9rem; margin: 1rem 0; }
+        .logout { margin-top: 1rem; text-align: right; }
+        a { color: #666; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <h2>📅 未来一周订餐查询</h2>
+    {% if not session.get('token') %}
+        <form method="post" action="/login">
+            <input type="text" name="username" placeholder="账号（手机号）" required autofocus>
+            <input type="password" name="password" placeholder="密码" required>
+            <label style="display: flex; align-items: center; gap: 0.5rem;">
+                <input type="checkbox" name="remember" value="yes"> 记住我（30天内自动登录）
+            </label>
+            <button type="submit">登录并查询</button>
+        </form>
+    {% else %}
+        <div class="info">✅ 已登录：{{ session.get('username', '') }}</div>
+        <div class="logout"><a href="/logout">退出 / 切换账号</a></div>
+    {% endif %}
 
-# 登录表单（只有未登录时显示）
-if st.session_state.token is None:
-    with st.form("login_form"):
-        username = st.text_input("账号（手机号）")
-        password = st.text_input("密码", type="password")
-        col1, col2 = st.columns(2)
-        with col1:
-            remember = st.checkbox("记住我（本次会话有效）")
-        with col2:
-            submitted = st.form_submit_button("登录")
-        if submitted:
-            if not username or not password:
-                st.error("请填写完整")
-            else:
-                token = login(username, password)
-                if token:
-                    st.session_state.token = token
-                    st.success("登录成功！")
-                    st.rerun()
-else:
-    # 已登录，显示查询结果和退出按钮
-    st.info(f"当前账号已登录，如需切换请点击下方退出按钮")
-    if st.button("🚪 退出登录"):
-        st.session_state.token = None
-        st.rerun()
+    {% if error %}
+        <div class="error">❌ {{ error }}</div>
+    {% endif %}
+    {% if table %}
+        <div class="success">✅ 查询时间：{{ start_date }} ~ {{ end_date }}</div>
+        <table>
+            <tr><th>星期</th><th>午餐</th><th>晚餐</th></tr>
+            {% for row in table %}
+            <tr>
+                <td>{{ row[0] }}</td>
+                <td>{{ row[1] }}</td>
+                <td>{{ row[2] }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+    {% endif %}
+</body>
+</html>
+"""
 
-    with st.spinner("正在获取订餐数据..."):
-        try:
-            orders = fetch_orders(st.session_state.token)
-            if not orders:
-                st.warning("未找到任何订餐记录")
-            else:
-                date_list = get_date_range()
-                table_data = generate_table(orders, date_list)
-                # 显示日期范围
-                st.write(f"📅 查询范围：{date_list[0]} 至 {date_list[-1]}")
-                # 显示表格
-                st.table({
-                    "星期": [row[0] for row in table_data],
-                    "午餐": [row[1] for row in table_data],
-                    "晚餐": [row[2] for row in table_data]
-                })
-                # 增加导出 CSV 按钮
-                import pandas as pd
-                df = pd.DataFrame(table_data, columns=["星期", "午餐", "晚餐"])
-                csv = df.to_csv(index=False).encode('utf-8')
-                st.download_button("📥 下载为 CSV", data=csv, file_name="meal_plan.csv", mime="text/csv")
-        except Exception as e:
-            st.error(f"查询失败：{str(e)}")
+@app.route('/')
+def index():
+    if not session.get('token'):
+        return render_template_string(HTML_TEMPLATE, session={})
+    try:
+        orders = fetch_orders(session['token'])
+        date_list = get_week_dates()
+        lines = generate_report(orders, date_list)
+        start_date = date_list[0]
+        end_date = date_list[-1]
+        return render_template_string(HTML_TEMPLATE, session=session, table=lines, start_date=start_date, end_date=end_date)
+    except Exception as e:
+        session.clear()
+        return render_template_string(HTML_TEMPLATE, session={}, error=f"登录状态已失效，请重新登录 ({str(e)})")
+
+@app.route('/login', methods=['POST'])
+def login():
+    username = request.form.get('username')
+    password = request.form.get('password')
+    remember = request.form.get('remember') == 'yes'
+    if not username or not password:
+        return render_template_string(HTML_TEMPLATE, session={}, error="请填写账号和密码")
+    try:
+        token = get_token_by_password(username, password)
+        session['token'] = token
+        session['username'] = username
+        if remember:
+            session.permanent = True
+        else:
+            session.permanent = False
+        return redirect(url_for('index'))
+    except Exception as e:
+        return render_template_string(HTML_TEMPLATE, session={}, error=str(e))
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('index'))
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
