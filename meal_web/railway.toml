@@ -1,0 +1,2 @@
+[deploy]
+startCommand = "python deepseek_python_20260501_253b50.py"
