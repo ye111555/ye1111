@@ -21,7 +21,13 @@ def fetch_orders(token):
     url = "https://api.icampus.ltd/api/hssdyzx/user/order_service/goods"
     params = {"payment": 2, "limit": 200, "index": 0}
     cookies = {"token": token}
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Referer": "https://wx.icampus.ltd/",
+        "Origin": "https://wx.icampus.ltd"
+    }
     resp = requests.get(url, headers=headers, cookies=cookies, params=params, timeout=10)
     if resp.status_code != 200:
         st.error(f"订单接口错误：HTTP {resp.status_code}")
