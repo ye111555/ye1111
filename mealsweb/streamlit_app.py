@@ -161,9 +161,15 @@ else:
                     "午餐": [row[1] for row in table],
                     "晚餐": [row[2] for row in table]
                 })
-                import pandas as pd
-                df = pd.DataFrame(table, columns=["星期", "午餐", "晚餐"])
-                csv = df.to_csv(index=False).encode('utf-8')
-                st.download_button("📥 下载 CSV", csv, "meal_plan.csv", "text/csv")
+                txt_lines = []
+                for row in table:
+                    txt_lines.append(f"{row[0]}\t{row[1]}\t{row[2]}")
+                txt_content = "\n".join(txt_lines).encode('utf-8')
+                st.download_button(
+                    label="📥 下载 TXT",
+                    data=txt_content,
+                    file_name="meal_plan.txt",
+                    mime="application/octet-stream"
+                )
         except Exception as e:
             st.error(f"查询失败：{str(e)}")
